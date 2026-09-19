@@ -3,8 +3,7 @@
  * -----------------------------------------------------------------------
  * Uses Google's current, actively-maintained SDK (@google/genai), which
  * supports the new "Auth key" format (keys starting with "AQ.") that
- * Google AI Studio now issues by default. The older @google/generative-ai
- * package is deprecated and does not reliably support these newer keys.
+ * Google AI Studio now issues by default.
  *
  * Emergency detection and off-topic refusal stay as hard guards in plain
  * code - safety-critical behavior that should never depend on a model
@@ -51,17 +50,19 @@ function detectOffTopic(text) {
 const functionDeclarations = [
   {
     name: 'CreateServiceRequest',
-    description: 'File a new 311 service request once category, subCategory, description, and address are all known. Never call this without confirming with the citizen first.',
+    description: 'File a new 311 service request once category, subCategory, description, and a CONFIRMED address are all known. Never call this before the citizen has explicitly confirmed the address (whether auto-detected or manually given).',
     parameters: {
       type: Type.OBJECT,
       properties: {
         category: { type: Type.STRING, description: 'e.g. Street, Sanitation, Parking, Noise, Parks, Street Lighting' },
         subCategory: { type: Type.STRING, description: 'e.g. Pothole, Illegal Parking, Missed Trash Collection, Noise Complaint' },
         description: { type: Type.STRING },
-        address: { type: Type.STRING },
+        address: { type: Type.STRING, description: 'The confirmed address - either the citizen-typed address, or "Lat X, Lng Y" if they confirmed the auto-detected location as-is.' },
         city: { type: Type.STRING },
         state: { type: Type.STRING },
         zipCode: { type: Type.STRING },
+        latitude: { type: Type.NUMBER, description: 'Only include if the confirmed address is the auto-detected location.' },
+        longitude: { type: Type.NUMBER, description: 'Only include if the confirmed address is the auto-detected location.' },
       },
       required: ['category', 'subCategory', 'description', 'address'],
     },
@@ -153,10 +154,25 @@ city service requests. You can:
 Rules you must always follow:
 - Never invent a request number. Only report one that a tool call actually returned.
 - Never claim a request was created unless CreateServiceRequest actually succeeded.
-- Before calling CreateServiceRequest, always summarize the category, description, and address back to
-  the citizen and get an explicit yes/confirmation first.
-- If required info (category, description, or address) is missing, ask for it - don't guess.
-- Keep replies concise and friendly, written for a citizen using a chat widget.`;
+- If required info (category or description) is missing, ask for it - don't guess.
+
+LOCATION HANDLING - follow this exactly:
+- Some messages will include a hidden line like "[Known location, not shown to citizen: lat X, lng Y]".
+  This means the citizen's browser already detected their location automatically.
+- When you have category, subCategory, and description, and a known lat/lng is available, ALWAYS show
+  the citizen the detected location (as approximate coordinates, e.g. "18.52355, 73.82563") and explicitly
+  ask: "Is this the correct location, or would you like to enter a different address?" Do not assume they
+  want to use it - always ask first.
+- If the citizen confirms the detected location is correct (e.g. "yes", "that's right", "use it"), use it
+  as the address (format "Lat X, Lng Y") and pass the latitude/longitude to CreateServiceRequest as well.
+- If the citizen provides a different address instead, use exactly what they typed as the address, and do
+  NOT pass latitude/longitude (leave them out) since that address may not match the detected coordinates.
+- If no known lat/lng is available at all, just ask the citizen for the address or nearest cross-street
+  directly - don't mention "detected location" since none was detected.
+- Only after the address is confirmed (either way), summarize category, description, and the confirmed
+  address, and ask for final yes/no confirmation before calling CreateServiceRequest.
+
+Keep replies concise and friendly, written for a citizen using a chat widget.`;
 
 async function handleMessage(sessionId, userText, location) {
   const session = getSession(sessionId);
@@ -166,7 +182,6 @@ async function handleMessage(sessionId, userText, location) {
     session.location = location;
   }
 
-  // Hard safety guard - never let the model handle this.
   if (detectEmergency(text)) {
     return {
       reply:
@@ -175,7 +190,6 @@ async function handleMessage(sessionId, userText, location) {
     };
   }
 
-  // Hard scope guard - never let the model wander off-topic.
   if (detectOffTopic(text)) {
     return {
       reply:
