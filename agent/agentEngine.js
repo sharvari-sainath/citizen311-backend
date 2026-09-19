@@ -1,23 +1,22 @@
 /**
- * AGENT ENGINE (Gemini-powered)
+ * AGENT ENGINE (Gemini-powered, using the current @google/genai SDK)
  * -----------------------------------------------------------------------
- * Replaces the old rule-based intent detection with a real LLM (Google
- * Gemini) using function calling. Gemini decides which tool to call
- * (CreateServiceRequest, GetServiceRequest, GetRequestHistory,
- * SearchServices, FindAgency, KnowledgeSearch) based on the conversation,
- * and we execute that tool against mock/mockDataverse.js and hand the
- * result back to Gemini to produce the final natural-language reply.
+ * Uses Google's current, actively-maintained SDK (@google/genai), which
+ * supports the new "Auth key" format (keys starting with "AQ.") that
+ * Google AI Studio now issues by default. The older @google/generative-ai
+ * package is deprecated and does not reliably support these newer keys.
  *
- * Emergency detection and off-topic refusal are kept as hard guards in
- * plain code (not left to the model) since those are safety-critical and
- * should never depend on a model call succeeding or behaving as expected.
+ * Emergency detection and off-topic refusal stay as hard guards in plain
+ * code - safety-critical behavior that should never depend on a model
+ * call succeeding or behaving as expected.
  * -----------------------------------------------------------------------
  */
 
-const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
+const { GoogleGenAI, Type } = require('@google/genai');
 const db = require('../mock/mockDataverse');
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const MODEL = 'gemini-2.5-flash';
 
 // In-memory conversation history per session (per browser tab).
 const sessions = new Map();
@@ -49,79 +48,74 @@ function detectOffTopic(text) {
 }
 
 // ---------- Tool (function) declarations Gemini can call ----------
-const tools = [
+const functionDeclarations = [
   {
-    functionDeclarations: [
-      {
-        name: 'CreateServiceRequest',
-        description: 'File a new 311 service request once category, subCategory, description, and address are all known. Never call this without confirming with the citizen first.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            category: { type: SchemaType.STRING, description: 'e.g. Street, Sanitation, Parking, Noise, Parks, Street Lighting' },
-            subCategory: { type: SchemaType.STRING, description: 'e.g. Pothole, Illegal Parking, Missed Trash Collection, Noise Complaint' },
-            description: { type: SchemaType.STRING },
-            address: { type: SchemaType.STRING },
-            city: { type: SchemaType.STRING },
-            state: { type: SchemaType.STRING },
-            zipCode: { type: SchemaType.STRING },
-          },
-          required: ['category', 'subCategory', 'description', 'address'],
-        },
+    name: 'CreateServiceRequest',
+    description: 'File a new 311 service request once category, subCategory, description, and address are all known. Never call this without confirming with the citizen first.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        category: { type: Type.STRING, description: 'e.g. Street, Sanitation, Parking, Noise, Parks, Street Lighting' },
+        subCategory: { type: Type.STRING, description: 'e.g. Pothole, Illegal Parking, Missed Trash Collection, Noise Complaint' },
+        description: { type: Type.STRING },
+        address: { type: Type.STRING },
+        city: { type: Type.STRING },
+        state: { type: Type.STRING },
+        zipCode: { type: Type.STRING },
       },
-      {
-        name: 'GetServiceRequest',
-        description: 'Look up a service request by its number, format REQ-000001.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: { requestNumber: { type: SchemaType.STRING } },
-          required: ['requestNumber'],
-        },
+      required: ['category', 'subCategory', 'description', 'address'],
+    },
+  },
+  {
+    name: 'GetServiceRequest',
+    description: 'Look up a service request by its number, format REQ-000001.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: { requestNumber: { type: Type.STRING } },
+      required: ['requestNumber'],
+    },
+  },
+  {
+    name: 'GetRequestHistory',
+    description: 'Get the status change history/timeline for a service request.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: { requestNumber: { type: Type.STRING } },
+      required: ['requestNumber'],
+    },
+  },
+  {
+    name: 'SearchServices',
+    description: 'Search the list of 311 service categories by keyword.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: { query: { type: Type.STRING } },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'FindAgency',
+    description: 'Find which city agency handles a given category/subCategory of issue.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        category: { type: Type.STRING },
+        subCategory: { type: Type.STRING },
       },
-      {
-        name: 'GetRequestHistory',
-        description: 'Get the status change history/timeline for a service request.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: { requestNumber: { type: SchemaType.STRING } },
-          required: ['requestNumber'],
-        },
-      },
-      {
-        name: 'SearchServices',
-        description: 'Search the list of 311 service categories by keyword.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: { query: { type: SchemaType.STRING } },
-          required: ['query'],
-        },
-      },
-      {
-        name: 'FindAgency',
-        description: 'Find which city agency handles a given category/subCategory of issue.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            category: { type: SchemaType.STRING },
-            subCategory: { type: SchemaType.STRING },
-          },
-          required: ['category'],
-        },
-      },
-      {
-        name: 'KnowledgeSearch',
-        description: 'Search the knowledge base for answers to common questions.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: { query: { type: SchemaType.STRING } },
-          required: ['query'],
-        },
-      },
-    ],
+      required: ['category'],
+    },
+  },
+  {
+    name: 'KnowledgeSearch',
+    description: 'Search the knowledge base for answers to common questions.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: { query: { type: Type.STRING } },
+      required: ['query'],
+    },
   },
 ];
 
-// ---------- Execute a tool call against the mock Dataverse layer ----------
 async function executeTool(name, args) {
   switch (name) {
     case 'CreateServiceRequest':
@@ -164,12 +158,6 @@ Rules you must always follow:
 - If required info (category, description, or address) is missing, ask for it - don't guess.
 - Keep replies concise and friendly, written for a citizen using a chat widget.`;
 
-const model = genAI.getGenerativeModel({
-  model: 'gemini-2.0-flash',
-  systemInstruction: SYSTEM_INSTRUCTION,
-  tools,
-});
-
 async function handleMessage(sessionId, userText, location) {
   const session = getSession(sessionId);
   const text = userText.trim();
@@ -199,19 +187,24 @@ async function handleMessage(sessionId, userText, location) {
     };
   }
 
-  const chat = model.startChat({ history: session.history });
+  const chat = ai.chats.create({
+    model: MODEL,
+    history: session.history,
+    config: {
+      systemInstruction: SYSTEM_INSTRUCTION,
+      tools: [{ functionDeclarations }],
+    },
+  });
 
-  // Silently give the model the citizen's known location as extra context.
   const locationNote = session.location
     ? `\n\n[Known location, not shown to citizen: lat ${session.location.latitude}, lng ${session.location.longitude}]`
     : '';
 
-  let result = await chat.sendMessage(text + locationNote);
+  let response = await chat.sendMessage({ message: text + locationNote });
   const toolCallsUsed = [];
 
-  // Loop: keep executing tool calls Gemini requests until it gives a final text reply.
   for (let i = 0; i < 5; i++) {
-    const call = result.response.functionCalls()?.[0];
+    const call = response.functionCalls?.[0];
     if (!call) break;
 
     toolCallsUsed.push(call.name);
@@ -221,20 +214,22 @@ async function handleMessage(sessionId, userText, location) {
       session.lastRequestNumber = toolResult.requestNumber;
     }
 
-    result = await chat.sendMessage([
-      {
-        functionResponse: {
-          name: call.name,
-          response: { result: toolResult },
+    response = await chat.sendMessage({
+      message: [
+        {
+          functionResponse: {
+            name: call.name,
+            response: { result: toolResult },
+          },
         },
-      },
-    ]);
+      ],
+    });
   }
 
-  session.history = await chat.getHistory();
+  session.history = chat.getHistory();
 
   return {
-    reply: result.response.text(),
+    reply: response.text,
     toolCalls: toolCallsUsed,
   };
 }
