@@ -15,7 +15,7 @@ const { GoogleGenAI, Type } = require('@google/genai');
 const db = require('../mock/mockDataverse');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const MODEL = 'gemini-3.6-flash';
+const MODEL = 'gemini-3.1-flash-lite';
 
 // In-memory conversation history per session (per browser tab).
 const sessions = new Map();
