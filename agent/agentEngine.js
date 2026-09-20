@@ -174,6 +174,27 @@ LOCATION HANDLING - follow this exactly:
 
 Keep replies concise and friendly, written for a citizen using a chat widget.`;
 
+// Retries a Gemini call on transient errors (503 overloaded, 429 rate-limited
+// per-minute bursts) with short exponential backoff. Does NOT retry on
+// non-transient errors (400 bad request, daily quota exhaustion) since
+// retrying those just wastes time and quota for no benefit.
+async function withRetry(fn, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const status = err?.status;
+      const isTransient = status === 503 || status === 429;
+      if (!isTransient || i === attempts - 1) throw err;
+      const delayMs = 1000 * Math.pow(2, i); // 1s, 2s, 4s
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 async function handleMessage(sessionId, userText, location) {
   const session = getSession(sessionId);
   const text = userText.trim();
@@ -214,7 +235,7 @@ async function handleMessage(sessionId, userText, location) {
     ? `\n\n[Known location, not shown to citizen: lat ${session.location.latitude}, lng ${session.location.longitude}]`
     : '';
 
-  let response = await chat.sendMessage({ message: text + locationNote });
+  let response = await withRetry(() => chat.sendMessage({ message: text + locationNote }));
   const toolCallsUsed = [];
 
   for (let i = 0; i < 5; i++) {
@@ -228,16 +249,18 @@ async function handleMessage(sessionId, userText, location) {
       session.lastRequestNumber = toolResult.requestNumber;
     }
 
-    response = await chat.sendMessage({
-      message: [
-        {
-          functionResponse: {
-            name: call.name,
-            response: { result: toolResult },
+    response = await withRetry(() =>
+      chat.sendMessage({
+        message: [
+          {
+            functionResponse: {
+              name: call.name,
+              response: { result: toolResult },
+            },
           },
-        },
-      ],
-    });
+        ],
+      })
+    );
   }
 
   session.history = chat.getHistory();
