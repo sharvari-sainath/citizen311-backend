@@ -157,17 +157,18 @@ Rules you must always follow:
 - If required info (category or description) is missing, ask for it - don't guess.
 
 LOCATION HANDLING - follow this exactly:
-- Some messages will include a hidden line like "[Known location, not shown to citizen: lat X, lng Y]".
-  This means the citizen's browser already detected their location automatically.
-- When you have category, subCategory, and description, and a known lat/lng is available, ALWAYS show
-  the citizen the detected location (as approximate coordinates, e.g. "18.52355, 73.82563") and explicitly
-  ask: "Is this the correct location, or would you like to enter a different address?" Do not assume they
-  want to use it - always ask first.
-- If the citizen confirms the detected location is correct (e.g. "yes", "that's right", "use it"), use it
-  as the address (format "Lat X, Lng Y") and pass the latitude/longitude to CreateServiceRequest as well.
+- Some messages will include a hidden line like '[Known location, not shown to citizen yet: address "123 Main St, City" (lat X, lng Y)]'.
+  This means the citizen's browser already detected their location and it has been resolved to a real
+  street address automatically.
+- When you have category, subCategory, and description, and a known location is available, ALWAYS show
+  the citizen the detected ADDRESS (not raw coordinates, unless no address was resolvable - the hidden
+  note will tell you if that's the case) and explicitly ask: "Is this the correct location, or would you
+  like to enter a different address?" Do not assume they want to use it - always ask first.
+- If the citizen confirms the detected address is correct, use that exact address string when calling
+  CreateServiceRequest, and also pass the latitude/longitude that came with it.
 - If the citizen provides a different address instead, use exactly what they typed as the address, and do
   NOT pass latitude/longitude (leave them out) since that address may not match the detected coordinates.
-- If no known lat/lng is available at all, just ask the citizen for the address or nearest cross-street
+- If no known location is available at all, just ask the citizen for the address or nearest cross-street
   directly - don't mention "detected location" since none was detected.
 - Only after the address is confirmed (either way), summarize category, description, and the confirmed
   address, and ask for final yes/no confirmation before calling CreateServiceRequest.
@@ -195,12 +196,37 @@ async function withRetry(fn, attempts = 3) {
   throw lastErr;
 }
 
+// Reverse-geocodes lat/lng into a human-readable address using OpenStreetMap's
+// free Nominatim API (no API key needed). Falls back to null on any failure,
+// in which case the raw coordinates are used instead - the flow never breaks,
+// it just won't show a street name that particular time.
+async function reverseGeocode(latitude, longitude) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&zoom=18&addressdetails=1`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': '311-citizen-assistant/1.0 (demo project)' },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.display_name || null;
+  } catch {
+    return null;
+  }
+}
+
 async function handleMessage(sessionId, userText, location) {
   const session = getSession(sessionId);
   const text = userText.trim();
 
   if (location && typeof location.latitude === 'number' && typeof location.longitude === 'number') {
+    const isNewLocation =
+      !session.location ||
+      session.location.latitude !== location.latitude ||
+      session.location.longitude !== location.longitude;
     session.location = location;
+    if (isNewLocation) {
+      session.locationAddress = await reverseGeocode(location.latitude, location.longitude);
+    }
   }
 
   if (detectEmergency(text)) {
@@ -232,7 +258,9 @@ async function handleMessage(sessionId, userText, location) {
   });
 
   const locationNote = session.location
-    ? `\n\n[Known location, not shown to citizen: lat ${session.location.latitude}, lng ${session.location.longitude}]`
+    ? session.locationAddress
+      ? `\n\n[Known location, not shown to citizen yet: address "${session.locationAddress}" (lat ${session.location.latitude}, lng ${session.location.longitude})]`
+      : `\n\n[Known location, not shown to citizen: lat ${session.location.latitude}, lng ${session.location.longitude} - no street address could be resolved, so show these coordinates if needed]`
     : '';
 
   let response = await withRetry(() => chat.sendMessage({ message: text + locationNote }));
